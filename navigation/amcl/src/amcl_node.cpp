@@ -46,9 +46,13 @@
 #include "geometry_msgs/PoseWithCovarianceStamped.h"
 #include "geometry_msgs/PoseArray.h"
 #include "geometry_msgs/Pose.h"
+#include "geometry_msgs/Pose2D.h"
 #include "nav_msgs/GetMap.h"
 #include "nav_msgs/SetMap.h"
+#include "std_msgs/Bool.h"
 #include "std_srvs/Empty.h"
+
+#include <move_base_msgs/MoveBaseActionGoal.h>
 
 // For transform support
 #include "tf/transform_broadcaster.h"
@@ -65,6 +69,9 @@
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
 #include <boost/foreach.hpp>
+
+#include <boost/thread/locks.hpp>
+#include <boost/thread/shared_mutex.hpp>
 
 #define NEW_UNIFORM_SAMPLING 1
 
@@ -104,8 +111,12 @@ angle_diff(double a, double b)
   else
     return(d2);
 }
-                                                                                                           
+
 static const std::string scan_topic_ = "scan";
+
+typedef boost::shared_mutex Lock;
+typedef boost::unique_lock<Lock> WriteLock;
+typedef boost::shared_lock<Lock> ReadLock;
 
 class AmclNode
 {
@@ -163,6 +174,11 @@ class AmclNode
     void applyInitialPose();
 
     double getYaw(tf::Pose& t);
+
+    //lyb
+    void OffsetPoseUpdate(geometry_msgs::Pose2D::ConstPtr input);
+    void landMarkCB(const move_base_msgs::MoveBaseActionGoal::ConstPtr& goal_msg);
+    void updateInitialPoseFromOffset(const geometry_msgs::Pose2D& msg);
 
     //parameter for what odom to use
     std::string odom_frame_id_;
@@ -233,17 +249,21 @@ class AmclNode
     ros::NodeHandle private_nh_;
     ros::Publisher pose_pub_;
     ros::Publisher particlecloud_pub_;
+    ros::Publisher static_transform_pub;
     ros::ServiceServer global_loc_srv_;
     ros::ServiceServer nomotion_update_srv_; //to let amcl update samples without requiring motion
     ros::ServiceServer set_map_srv_;
     ros::Subscriber initial_pose_sub_old_;
     ros::Subscriber map_sub_;
+    ros::Subscriber offset_sub_;
+    ros::Subscriber land_mark_sub_;
 
     amcl_hyp_t* initial_pose_hyp_;
     bool first_map_received_;
     bool first_reconfigure_call_;
 
     boost::recursive_mutex configuration_mutex_;
+    boost::mutex offset_mutex_;
     dynamic_reconfigure::Server<amcl::AMCLConfig> *dsrv_;
     amcl::AMCLConfig default_config_;
     ros::Timer check_laser_timer_;
@@ -267,6 +287,15 @@ class AmclNode
     ros::Time last_laser_received_ts_;
     ros::Duration laser_check_interval_;
     void checkLaserReceived(const ros::TimerEvent& event);
+
+    Lock offset_locker_;
+    geometry_msgs::Pose2D offset_;
+
+    geometry_msgs::Pose2D land_mark_;
+
+    double offset_x_threshold_;
+    double offset_y_threshold_;
+    double offset_theta_threshold_;
 };
 
 std::vector<std::pair<int,int> > AmclNode::free_space_indices;
@@ -352,7 +381,14 @@ AmclNode::AmclNode() :
   private_nh_.param("do_beamskip", do_beamskip_, false);
   private_nh_.param("beam_skip_distance", beam_skip_distance_, 0.5);
   private_nh_.param("beam_skip_threshold", beam_skip_threshold_, 0.3);
-  private_nh_.param("beam_skip_error_threshold_", beam_skip_error_threshold_, 0.9);
+  if (private_nh_.hasParam("beam_skip_error_threshold_"))
+  {
+    private_nh_.param("beam_skip_error_threshold_", beam_skip_error_threshold_);
+  }
+  else
+  {
+    private_nh_.param("beam_skip_error_threshold", beam_skip_error_threshold_, 0.9);
+  }
 
   private_nh_.param("laser_z_hit", z_hit_, 0.95);
   private_nh_.param("laser_z_short", z_short_, 0.1);
@@ -405,6 +441,11 @@ AmclNode::AmclNode() :
   private_nh_.param("recovery_alpha_fast", alpha_fast_, 0.1);
   private_nh_.param("tf_broadcast", tf_broadcast_, true);
 
+  //lyb
+  private_nh_.param("offset_x_threshold", offset_x_threshold_, 0.12);
+  private_nh_.param("offset_y_threshold", offset_y_threshold_, 0.12);
+  private_nh_.param("offset_theta_threshold", offset_theta_threshold_, 0.12);
+
   transform_tolerance_.fromSec(tmp_tol);
 
   {
@@ -421,6 +462,7 @@ AmclNode::AmclNode() :
 
   pose_pub_ = nh_.advertise<geometry_msgs::PoseWithCovarianceStamped>("amcl_pose", 2, true);
   particlecloud_pub_ = nh_.advertise<geometry_msgs::PoseArray>("particlecloud", 2, true);
+  static_transform_pub = nh_.advertise<std_msgs::Bool>("/stop_static_transform", 1);
   global_loc_srv_ = nh_.advertiseService("global_localization", 
 					 &AmclNode::globalLocalizationCallback,
                                          this);
@@ -428,7 +470,7 @@ AmclNode::AmclNode() :
   set_map_srv_= nh_.advertiseService("set_map", &AmclNode::setMapCallback, this);
 
   laser_scan_sub_ = new message_filters::Subscriber<sensor_msgs::LaserScan>(nh_, scan_topic_, 100);
-  laser_scan_filter_ = 
+  laser_scan_filter_ =
           new tf::MessageFilter<sensor_msgs::LaserScan>(*laser_scan_sub_, 
                                                         *tf_, 
                                                         odom_frame_id_, 
@@ -436,6 +478,10 @@ AmclNode::AmclNode() :
   laser_scan_filter_->registerCallback(boost::bind(&AmclNode::laserReceived,
                                                    this, _1));
   initial_pose_sub_ = nh_.subscribe("initialpose", 2, &AmclNode::initialPoseReceived, this);
+
+  //lyb
+  offset_sub_ = nh_.subscribe("offset", 1, &AmclNode::OffsetPoseUpdate, this);
+  land_mark_sub_ = nh_.subscribe("move_base/goal", 1, &AmclNode::landMarkCB, this);
 
   if(use_map_topic_) {
     map_sub_ = nh_.subscribe("map", 1, &AmclNode::mapReceived, this);
@@ -453,6 +499,10 @@ AmclNode::AmclNode() :
   laser_check_interval_ = ros::Duration(15.0);
   check_laser_timer_ = nh_.createTimer(laser_check_interval_, 
                                        boost::bind(&AmclNode::checkLaserReceived, this, _1));
+
+  offset_.x = 1e3;
+  offset_.y = 1e3;
+  offset_.theta = 1e3;
 }
 
 void AmclNode::reconfigureCB(AMCLConfig &config, uint32_t level)
@@ -1092,14 +1142,25 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
     laser_index = frame_to_laser_[laser_scan->header.frame_id];
   }
 
-  // Where was the robot when this scan was taken?-
+  // Where was the robot when this scan was taken?
   pf_vector_t pose;
+  static bool count_stop = false;
   if(!getOdomPose(latest_odom_pose_, pose.v[0], pose.v[1], pose.v[2],
                   laser_scan->header.stamp, base_frame_id_))
   {
     ROS_ERROR("Couldn't determine robot's pose associated with laser scan");
     return;
   }
+else{
+		if((pose.v[0] > 0.01 || pose.v[1] > 0.01) && !count_stop){
+		  std_msgs::Bool static_transform;
+		  static_transform.data = false;
+		  static_transform_pub.publish(static_transform);
+		  count_stop = true;
+		  static_transform_pub.publish(static_transform);
+		  
+	     }
+	  }
 
 
   pf_vector_t delta = pf_vector_zero();
@@ -1277,7 +1338,8 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
       if (!pf_get_cluster_stats(pf_, hyp_count, &weight, &pose_mean, &pose_cov))
       {
         ROS_ERROR("Couldn't get stats on cluster %d", hyp_count);
-        break;
+        //break;
+	continue;
       }
 
       hyps[hyp_count].weight = weight;
@@ -1343,7 +1405,7 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
       pose_pub_.publish(p);
       last_published_pose = p;
 
-      ROS_DEBUG("New pose: %6.3f %6.3f %6.3f",
+      ROS_INFO("New pose: %6.3f %6.3f %6.3f",
                hyps[max_weight_hyp].pf_pose_mean.v[0],
                hyps[max_weight_hyp].pf_pose_mean.v[1],
                hyps[max_weight_hyp].pf_pose_mean.v[2]);
@@ -1352,10 +1414,46 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
       tf::Stamped<tf::Pose> odom_to_map;
       try
       {
+        float offset_x = 1000.0;
+        float offset_y = 1000.0;
+        float offset_yaw = 1000.0;
+        //lyb
+        {
+          ROS_INFO("offset handle enterency!!!!");
+          ReadLock rLock(offset_locker_);
+          if(std::abs(offset_.x) < offset_x_threshold_ && std::abs(offset_.y) < offset_y_threshold_ && std::abs(offset_.theta) < offset_theta_threshold_)
+          {
+            ROS_INFO("offset condition is satisfied!!!!");
+            offset_x = offset_.x;
+            offset_y = offset_.y;
+            offset_yaw = offset_.theta;
+
+            ROS_INFO("Offset: x = %f, y = %f, yaw = %f", offset_x, offset_y, offset_yaw);
+          }else{
+            ROS_INFO("offset condition is not satisfied!!!!");
+            offset_x = 1000.0;
+            offset_y = 1000.0;
+            offset_yaw = 1000.0;
+          }
+        }
+        
+
         tf::Transform tmp_tf(tf::createQuaternionFromYaw(hyps[max_weight_hyp].pf_pose_mean.v[2]),
                              tf::Vector3(hyps[max_weight_hyp].pf_pose_mean.v[0],
                                          hyps[max_weight_hyp].pf_pose_mean.v[1],
                                          0.0));
+
+        if(std::abs(offset_x) < offset_x_threshold_ && std::abs(offset_y) < offset_y_threshold_ && std::abs(offset_yaw) < offset_theta_threshold_)
+        {
+          ROS_INFO("wow, update tf from offset!!!!");
+          geometry_msgs::Pose2D updatePose;
+          updatePose.x = land_mark_.x + offset_x;
+          updatePose.y = land_mark_.y + offset_y;
+          updatePose.theta = land_mark_.theta + offset_yaw;
+          tf::Transform tmp_tmp_tf(tf::createQuaternionFromYaw(updatePose.theta), tf::Vector3(updatePose.x, updatePose.y, 0.0));
+          tmp_tf = tmp_tmp_tf;
+        }
+        
         tf::Stamped<tf::Pose> tmp_tf_stamped (tmp_tf.inverse(),
                                               laser_scan->header.stamp,
                                               base_frame_id_);
@@ -1393,6 +1491,61 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
   }
   else if(latest_tf_valid_)
   {
+    tf::Stamped<tf::Pose> odom_to_map;
+    try
+      {
+        float offset_x = 1000.0;
+        float offset_y = 1000.0;
+        float offset_yaw = 1000.0;
+        //lyb
+        {
+          ROS_INFO("offset handle enterency!!!!");
+          ReadLock rLock(offset_locker_);
+          if(std::abs(offset_.x) < offset_x_threshold_ && std::abs(offset_.y) < offset_y_threshold_ && std::abs(offset_.theta) < offset_theta_threshold_)
+          {
+            ROS_INFO("offset condition is satisfied!!!!");
+            offset_x = offset_.x;
+            offset_y = offset_.y;
+            offset_yaw = offset_.theta;
+
+            ROS_INFO("Offset: x = %f, y = %f, yaw = %f", offset_x, offset_y, offset_yaw);
+          }else{
+            ROS_INFO("offset condition is not satisfied!!!!");
+            offset_x = 1000.0;
+            offset_y = 1000.0;
+            offset_yaw = 1000.0;
+          }
+        }
+
+        tf::Transform tmp_tf;
+
+        if(std::abs(offset_x) < offset_x_threshold_ && std::abs(offset_y) < offset_y_threshold_ && std::abs(offset_yaw) < offset_theta_threshold_)
+        {
+          ROS_INFO("wow, update tf from offset!!!!");
+          geometry_msgs::Pose2D updatePose;
+          updatePose.x = land_mark_.x + offset_x;
+          updatePose.y = land_mark_.y + offset_y;
+          updatePose.theta = land_mark_.theta + offset_yaw;
+          tf::Transform tmp_tmp_tf(tf::createQuaternionFromYaw(updatePose.theta), tf::Vector3(updatePose.x, updatePose.y, 0.0));
+          tmp_tf = tmp_tmp_tf;
+        
+        
+        tf::Stamped<tf::Pose> tmp_tf_stamped (tmp_tf.inverse(),
+                                              laser_scan->header.stamp,
+                                              base_frame_id_);
+        this->tf_->transformPose(odom_frame_id_,
+                                 tmp_tf_stamped,
+                                 odom_to_map);
+        latest_tf_ = tf::Transform(tf::Quaternion(odom_to_map.getRotation()),
+                                 tf::Point(odom_to_map.getOrigin()));
+        }
+      }
+      catch(tf::TransformException)
+      {
+        ROS_DEBUG("Failed to subtract base to odom transform");
+        return;
+      }
+
     if (tf_broadcast_ == true)
     {
       // Nothing changed, so we'll just republish the last transform, to keep
@@ -1524,4 +1677,47 @@ AmclNode::applyInitialPose()
     delete initial_pose_hyp_;
     initial_pose_hyp_ = NULL;
   }
+}
+
+void AmclNode::OffsetPoseUpdate(geometry_msgs::Pose2D::ConstPtr input)
+{
+    WriteLock wLock(offset_locker_);
+    offset_ = *input;
+    // ROS_INFO("receive offset data, offset_.x = %f, offset_.y = %f, offset_.theta = %f", offset_.x, offset_.y, offset_.theta);
+}
+
+void AmclNode::landMarkCB(const move_base_msgs::MoveBaseActionGoal::ConstPtr& goal_msg)
+{
+    boost::mutex::scoped_lock(offset_mutex_);
+    land_mark_.x = goal_msg->goal.target_pose.pose.position.x;
+    land_mark_.y = goal_msg->goal.target_pose.pose.position.y;
+    land_mark_.theta = tf::getYaw(goal_msg->goal.target_pose.pose.orientation);
+    ROS_INFO("receive move_base goal, land_mark_.x = %f, land_mark_.y = %f, land_mark_.theta = %f", land_mark_.x, land_mark_.y, land_mark_.theta);
+
+}
+
+void AmclNode::updateInitialPoseFromOffset(const geometry_msgs::Pose2D& msg)
+{
+  boost::recursive_mutex::scoped_lock prl(configuration_mutex_);
+	// Re-initialize the filter
+  pf_vector_t pf_init_pose_mean = pf_vector_zero();
+  pf_init_pose_mean.v[0] = msg.x;
+  pf_init_pose_mean.v[1] = msg.y;
+  pf_init_pose_mean.v[2] = msg.theta;
+  pf_matrix_t pf_init_pose_cov = pf_matrix_zero();
+  // Copy in the covariance, converting from 6-D to 3-D
+  for(int i=0; i<2; i++)
+  {
+    for(int j=0; j<2; j++)
+    {
+      pf_init_pose_cov.m[i][j] = 0.001;
+    }
+  }
+  pf_init_pose_cov.m[2][2] = 0.001;
+
+  delete initial_pose_hyp_;
+  initial_pose_hyp_ = new amcl_hyp_t();
+  initial_pose_hyp_->pf_pose_mean = pf_init_pose_mean;
+  initial_pose_hyp_->pf_pose_cov = pf_init_pose_cov;
+  applyInitialPose();
 }
