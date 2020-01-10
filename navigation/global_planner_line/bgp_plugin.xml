@@ -1,0 +1,7 @@
+<library path="lib/libglobal_planner_line">
+  <class name="global_planner_line/GlobalPlannerLine" type="global_planner_line::GlobalPlannerLine" base_class_type="nav_core::BaseGlobalPlanner">
+    <description>
+      A simple planner that try to go along straight line.
+    </description>
+  </class>
+</library>
