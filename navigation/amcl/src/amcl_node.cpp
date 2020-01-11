@@ -73,6 +73,8 @@
 #include <boost/thread/locks.hpp>
 #include <boost/thread/shared_mutex.hpp>
 
+#include <angles/angles.h>
+
 #define NEW_UNIFORM_SAMPLING 1
 
 using namespace amcl;
@@ -296,6 +298,11 @@ class AmclNode
     double offset_x_threshold_;
     double offset_y_threshold_;
     double offset_theta_threshold_;
+    double offset_for_new_goal_;//if new goal id received, delay update tf step;
+    ros::Time offset_update_time_;
+    ros::Time offset_inspect_time_;
+
+    bool offset_enable_;
 };
 
 std::vector<std::pair<int,int> > AmclNode::free_space_indices;
@@ -348,10 +355,11 @@ AmclNode::AmclNode() :
         resample_count_(0),
         odom_(NULL),
         laser_(NULL),
-	      private_nh_("~"),
+	  private_nh_("~"),
         initial_pose_hyp_(NULL),
         first_map_received_(false),
-        first_reconfigure_call_(true)
+        first_reconfigure_call_(true),
+        offset_enable_(false)
 {
   boost::recursive_mutex::scoped_lock l(configuration_mutex_);
 
@@ -445,6 +453,7 @@ AmclNode::AmclNode() :
   private_nh_.param("offset_x_threshold", offset_x_threshold_, 0.12);
   private_nh_.param("offset_y_threshold", offset_y_threshold_, 0.12);
   private_nh_.param("offset_theta_threshold", offset_theta_threshold_, 0.12);
+  private_nh_.param("offset_for_new_goal", offset_for_new_goal_, 0.2);
 
   transform_tolerance_.fromSec(tmp_tol);
 
@@ -1322,6 +1331,8 @@ else{
     }
   }
 
+  offset_inspect_time_ = ros::Time::now();
+  double delta_t = (offset_inspect_time_ - offset_update_time_).toSec();
   if(resampled || force_publication)
   {
     // Read out the current hypotheses
@@ -1416,44 +1427,60 @@ else{
       {
         float offset_x = 1000.0;
         float offset_y = 1000.0;
-        float offset_yaw = 1000.0;
+        float offset_theta = 1000.0;
+
+
         //lyb
         {
-          ROS_INFO("offset handle enterency!!!!");
+          // ROS_INFO("offset handle enterency!!!!");
           ReadLock rLock(offset_locker_);
-          if(std::abs(offset_.x) < offset_x_threshold_ && std::abs(offset_.y) < offset_y_threshold_ && std::abs(offset_.theta) < offset_theta_threshold_)
+          if(std::abs(offset_.x) < offset_x_threshold_ && std::abs(offset_.y) < offset_y_threshold_ && std::abs(offset_.theta) < offset_theta_threshold_ && delta_t < 0.5)
           {
-            ROS_INFO("offset condition is satisfied!!!!");
+            ROS_INFO("offset condition is satisfied, 000");
             offset_x = offset_.x;
             offset_y = offset_.y;
-            offset_yaw = offset_.theta;
+            offset_theta = offset_.theta;
 
-            ROS_INFO("Offset: x = %f, y = %f, yaw = %f", offset_x, offset_y, offset_yaw);
+            ROS_INFO("Offset: x = %f, y = %f, yaw = %f", offset_x, offset_y, offset_theta);
           }else{
-            ROS_INFO("offset condition is not satisfied!!!!");
+            ROS_INFO("offset condition is not satisfied, 000");
             offset_x = 1000.0;
             offset_y = 1000.0;
-            offset_yaw = 1000.0;
+            offset_theta = 1000.0;
           }
         }
         
-
         tf::Transform tmp_tf(tf::createQuaternionFromYaw(hyps[max_weight_hyp].pf_pose_mean.v[2]),
                              tf::Vector3(hyps[max_weight_hyp].pf_pose_mean.v[0],
                                          hyps[max_weight_hyp].pf_pose_mean.v[1],
                                          0.0));
 
-        if(std::abs(offset_x) < offset_x_threshold_ && std::abs(offset_y) < offset_y_threshold_ && std::abs(offset_yaw) < offset_theta_threshold_)
+        // ROS_INFO("pf pose: %f, %f, %f", hyps[max_weight_hyp].pf_pose_mean.v[0], hyps[max_weight_hyp].pf_pose_mean.v[1], hyps[max_weight_hyp].pf_pose_mean.v[2]);
+        // ROS_INFO("land_mark_ pose: %f, %f, %f", land_mark_.x, land_mark_.y, land_mark_.theta);
+
+        double delta_theta = angles::shortest_angular_distance(hyps[max_weight_hyp].pf_pose_mean.v[2], land_mark_.theta);
+        double delta_x = hyps[max_weight_hyp].pf_pose_mean.v[0] - land_mark_.x;
+        double delta_y = hyps[max_weight_hyp].pf_pose_mean.v[1] - land_mark_.y;
+
+        if(std::abs(delta_x) < (offset_x_threshold_ + offset_for_new_goal_) && std::abs(delta_y) < (offset_y_threshold_ + offset_for_new_goal_) && std::abs(delta_theta) < offset_theta_threshold_)
         {
-          ROS_INFO("wow, update tf from offset!!!!");
-          geometry_msgs::Pose2D updatePose;
-          updatePose.x = land_mark_.x + offset_x;
-          updatePose.y = land_mark_.y + offset_y;
-          updatePose.theta = land_mark_.theta + offset_yaw;
-          tf::Transform tmp_tmp_tf(tf::createQuaternionFromYaw(updatePose.theta), tf::Vector3(updatePose.x, updatePose.y, 0.0));
-          tmp_tf = tmp_tmp_tf;
+           offset_enable_ = true;
         }
-        
+
+        if(offset_enable_)
+        {
+          if(std::abs(offset_x) < offset_x_threshold_ && std::abs(offset_y) < offset_y_threshold_ && std::abs(offset_theta) < offset_theta_threshold_)
+          {
+            ROS_INFO("wow, update tf from offset, 000");
+            geometry_msgs::Pose2D updatePose;
+            float ref_theta = land_mark_.theta;
+            updatePose.x = land_mark_.x + offset_x * cos(ref_theta) - offset_y * sin(ref_theta);
+            updatePose.y = land_mark_.y + offset_x * sin(ref_theta) + offset_y * cos(ref_theta);
+            updatePose.theta = land_mark_.theta + offset_theta;
+            tf::Transform tmp_tmp_tf(tf::createQuaternionFromYaw(updatePose.theta), tf::Vector3(updatePose.x, updatePose.y, 0.0));
+            tmp_tf = tmp_tmp_tf;
+          }
+        }
         tf::Stamped<tf::Pose> tmp_tf_stamped (tmp_tf.inverse(),
                                               laser_scan->header.stamp,
                                               base_frame_id_);
@@ -1496,49 +1523,54 @@ else{
       {
         float offset_x = 1000.0;
         float offset_y = 1000.0;
-        float offset_yaw = 1000.0;
+        float offset_theta = 1000.0;
         //lyb
         {
-          ROS_INFO("offset handle enterency!!!!");
+          // ROS_INFO("offset handle enterency!!!!");
           ReadLock rLock(offset_locker_);
-          if(std::abs(offset_.x) < offset_x_threshold_ && std::abs(offset_.y) < offset_y_threshold_ && std::abs(offset_.theta) < offset_theta_threshold_)
+          if(std::abs(offset_.x) < offset_x_threshold_ && std::abs(offset_.y) < offset_y_threshold_ && std::abs(offset_.theta) < offset_theta_threshold_ && delta_t < 0.5)
           {
-            ROS_INFO("offset condition is satisfied!!!!");
+            ROS_INFO("offset condition is satisfied, 111");
             offset_x = offset_.x;
             offset_y = offset_.y;
-            offset_yaw = offset_.theta;
+            offset_theta = offset_.theta;
 
-            ROS_INFO("Offset: x = %f, y = %f, yaw = %f", offset_x, offset_y, offset_yaw);
+            ROS_INFO("Offset: x = %f, y = %f, yaw = %f", offset_x, offset_y, offset_theta);
           }else{
-            ROS_INFO("offset condition is not satisfied!!!!");
+            ROS_INFO("offset condition is not satisfied, 111");
             offset_x = 1000.0;
             offset_y = 1000.0;
-            offset_yaw = 1000.0;
+            offset_theta = 1000.0;
           }
         }
 
         tf::Transform tmp_tf;
 
-        if(std::abs(offset_x) < offset_x_threshold_ && std::abs(offset_y) < offset_y_threshold_ && std::abs(offset_yaw) < offset_theta_threshold_)
+        if(offset_enable_)
         {
-          ROS_INFO("wow, update tf from offset!!!!");
-          geometry_msgs::Pose2D updatePose;
-          updatePose.x = land_mark_.x + offset_x;
-          updatePose.y = land_mark_.y + offset_y;
-          updatePose.theta = land_mark_.theta + offset_yaw;
-          tf::Transform tmp_tmp_tf(tf::createQuaternionFromYaw(updatePose.theta), tf::Vector3(updatePose.x, updatePose.y, 0.0));
-          tmp_tf = tmp_tmp_tf;
-        
-        
-        tf::Stamped<tf::Pose> tmp_tf_stamped (tmp_tf.inverse(),
-                                              laser_scan->header.stamp,
-                                              base_frame_id_);
-        this->tf_->transformPose(odom_frame_id_,
-                                 tmp_tf_stamped,
-                                 odom_to_map);
-        latest_tf_ = tf::Transform(tf::Quaternion(odom_to_map.getRotation()),
-                                 tf::Point(odom_to_map.getOrigin()));
+           ROS_INFO("offset_enable_ is true, 111");
+            if(std::abs(offset_x) < offset_x_threshold_ && std::abs(offset_y) < offset_y_threshold_ && std::abs(offset_theta) < offset_theta_threshold_)
+            {
+              ROS_INFO("wow, update tf from offset, 111");
+              geometry_msgs::Pose2D updatePose;
+              float ref_theta = land_mark_.theta;
+              updatePose.x = land_mark_.x + offset_x * cos(ref_theta) - offset_y * sin(ref_theta);
+              updatePose.y = land_mark_.y + offset_x * sin(ref_theta) + offset_y * cos(ref_theta);
+              updatePose.theta = land_mark_.theta + offset_theta;
+              tf::Transform tmp_tmp_tf(tf::createQuaternionFromYaw(updatePose.theta), tf::Vector3(updatePose.x, updatePose.y, 0.0));
+              tmp_tf = tmp_tmp_tf;
+                  
+              tf::Stamped<tf::Pose> tmp_tf_stamped (tmp_tf.inverse(),
+                                                    laser_scan->header.stamp,
+                                                    base_frame_id_);
+              this->tf_->transformPose(odom_frame_id_,
+                                       tmp_tf_stamped,
+                                       odom_to_map);
+              latest_tf_ = tf::Transform(tf::Quaternion(odom_to_map.getRotation()),
+                                       tf::Point(odom_to_map.getOrigin()));
+            }
         }
+    
       }
       catch(tf::TransformException)
       {
@@ -1683,6 +1715,7 @@ void AmclNode::OffsetPoseUpdate(geometry_msgs::Pose2D::ConstPtr input)
 {
     WriteLock wLock(offset_locker_);
     offset_ = *input;
+    offset_update_time_ = ros::Time::now();
     // ROS_INFO("receive offset data, offset_.x = %f, offset_.y = %f, offset_.theta = %f", offset_.x, offset_.y, offset_.theta);
 }
 
@@ -1692,6 +1725,8 @@ void AmclNode::landMarkCB(const move_base_msgs::MoveBaseActionGoal::ConstPtr& go
     land_mark_.x = goal_msg->goal.target_pose.pose.position.x;
     land_mark_.y = goal_msg->goal.target_pose.pose.position.y;
     land_mark_.theta = tf::getYaw(goal_msg->goal.target_pose.pose.orientation);
+
+    offset_enable_ = false;
     ROS_INFO("receive move_base goal, land_mark_.x = %f, land_mark_.y = %f, land_mark_.theta = %f", land_mark_.x, land_mark_.y, land_mark_.theta);
 
 }
