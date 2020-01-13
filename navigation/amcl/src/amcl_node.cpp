@@ -24,6 +24,7 @@
 #include <vector>
 #include <map>
 #include <cmath>
+#include <float.h>
 
 #include <boost/bind.hpp>
 #include <boost/thread/mutex.hpp>
@@ -181,6 +182,8 @@ class AmclNode
     void OffsetPoseUpdate(geometry_msgs::Pose2D::ConstPtr input);
     void landMarkCB(const move_base_msgs::MoveBaseActionGoal::ConstPtr& goal_msg);
     void updateInitialPoseFromOffset(const geometry_msgs::Pose2D& msg);
+    void setOffsetTemp(geometry_msgs::Pose2D& offset_temp, const double& duration);
+    void updateRobPoseFromOffset(geometry_msgs::Pose2D& updatePose, const geometry_msgs::Pose2D offset_temp);
 
     //parameter for what odom to use
     std::string odom_frame_id_;
@@ -1425,30 +1428,10 @@ else{
       tf::Stamped<tf::Pose> odom_to_map;
       try
       {
-        float offset_x = 1000.0;
-        float offset_y = 1000.0;
-        float offset_theta = 1000.0;
-
+        geometry_msgs::Pose2D off_temp;
 
         //lyb
-        {
-          // ROS_INFO("offset handle enterency!!!!");
-          ReadLock rLock(offset_locker_);
-          if(std::abs(offset_.x) < offset_x_threshold_ && std::abs(offset_.y) < offset_y_threshold_ && std::abs(offset_.theta) < offset_theta_threshold_ && delta_t < 0.5)
-          {
-            ROS_INFO("offset condition is satisfied, 000");
-            offset_x = offset_.x;
-            offset_y = offset_.y;
-            offset_theta = offset_.theta;
-
-            ROS_INFO("Offset: x = %f, y = %f, yaw = %f", offset_x, offset_y, offset_theta);
-          }else{
-            ROS_INFO("offset condition is not satisfied, 000");
-            offset_x = 1000.0;
-            offset_y = 1000.0;
-            offset_theta = 1000.0;
-          }
-        }
+        setOffsetTemp(off_temp, delta_t);
         
         tf::Transform tmp_tf(tf::createQuaternionFromYaw(hyps[max_weight_hyp].pf_pose_mean.v[2]),
                              tf::Vector3(hyps[max_weight_hyp].pf_pose_mean.v[0],
@@ -1469,14 +1452,13 @@ else{
 
         if(offset_enable_)
         {
-          if(std::abs(offset_x) < offset_x_threshold_ && std::abs(offset_y) < offset_y_threshold_ && std::abs(offset_theta) < offset_theta_threshold_)
+          if(std::abs(off_temp.x) < offset_x_threshold_ && std::abs(off_temp.y) < offset_y_threshold_ && std::abs(off_temp.theta) < offset_theta_threshold_)
           {
             ROS_INFO("wow, update tf from offset, 000");
             geometry_msgs::Pose2D updatePose;
-            float ref_theta = land_mark_.theta;
-            updatePose.x = land_mark_.x + offset_x * cos(ref_theta) - offset_y * sin(ref_theta);
-            updatePose.y = land_mark_.y + offset_x * sin(ref_theta) + offset_y * cos(ref_theta);
-            updatePose.theta = land_mark_.theta + offset_theta;
+
+            updateRobPoseFromOffset(updatePose, off_temp);
+
             tf::Transform tmp_tmp_tf(tf::createQuaternionFromYaw(updatePose.theta), tf::Vector3(updatePose.x, updatePose.y, 0.0));
             tmp_tf = tmp_tmp_tf;
           }
@@ -1521,42 +1503,21 @@ else{
     tf::Stamped<tf::Pose> odom_to_map;
     try
       {
-        float offset_x = 1000.0;
-        float offset_y = 1000.0;
-        float offset_theta = 1000.0;
+        geometry_msgs::Pose2D off_temp;
         //lyb
-        {
-          // ROS_INFO("offset handle enterency!!!!");
-          ReadLock rLock(offset_locker_);
-          if(std::abs(offset_.x) < offset_x_threshold_ && std::abs(offset_.y) < offset_y_threshold_ && std::abs(offset_.theta) < offset_theta_threshold_ && delta_t < 0.5)
-          {
-            ROS_INFO("offset condition is satisfied, 111");
-            offset_x = offset_.x;
-            offset_y = offset_.y;
-            offset_theta = offset_.theta;
-
-            ROS_INFO("Offset: x = %f, y = %f, yaw = %f", offset_x, offset_y, offset_theta);
-          }else{
-            ROS_INFO("offset condition is not satisfied, 111");
-            offset_x = 1000.0;
-            offset_y = 1000.0;
-            offset_theta = 1000.0;
-          }
-        }
-
+        setOffsetTemp(off_temp, delta_t);
         tf::Transform tmp_tf;
 
         if(offset_enable_)
         {
            ROS_INFO("offset_enable_ is true, 111");
-            if(std::abs(offset_x) < offset_x_threshold_ && std::abs(offset_y) < offset_y_threshold_ && std::abs(offset_theta) < offset_theta_threshold_)
+            if(std::abs(off_temp.x) < offset_x_threshold_ && std::abs(off_temp.y) < offset_y_threshold_ && std::abs(off_temp.theta) < offset_theta_threshold_)
             {
               ROS_INFO("wow, update tf from offset, 111");
               geometry_msgs::Pose2D updatePose;
-              float ref_theta = land_mark_.theta;
-              updatePose.x = land_mark_.x + offset_x * cos(ref_theta) - offset_y * sin(ref_theta);
-              updatePose.y = land_mark_.y + offset_x * sin(ref_theta) + offset_y * cos(ref_theta);
-              updatePose.theta = land_mark_.theta + offset_theta;
+
+              updateRobPoseFromOffset(updatePose, off_temp);
+
               tf::Transform tmp_tmp_tf(tf::createQuaternionFromYaw(updatePose.theta), tf::Vector3(updatePose.x, updatePose.y, 0.0));
               tmp_tf = tmp_tmp_tf;
                   
@@ -1755,4 +1716,32 @@ void AmclNode::updateInitialPoseFromOffset(const geometry_msgs::Pose2D& msg)
   initial_pose_hyp_->pf_pose_mean = pf_init_pose_mean;
   initial_pose_hyp_->pf_pose_cov = pf_init_pose_cov;
   applyInitialPose();
+}
+
+void AmclNode::setOffsetTemp(geometry_msgs::Pose2D& offset_temp, const double& duration)
+{
+        ReadLock rLock(offset_locker_);
+        if(std::abs(offset_.x) < offset_x_threshold_ && std::abs(offset_.y) < offset_y_threshold_ && std::abs(offset_.theta) < offset_theta_threshold_ && duration < 0.5)
+        {
+          ROS_INFO("offset condition is satisfied, 111");
+          offset_temp.x = offset_.x;
+          offset_temp.y = offset_.y;
+          offset_temp.theta = offset_.theta;
+
+          ROS_INFO("Offset: x = %f, y = %f, yaw = %f", offset_temp.x, offset_temp.y, offset_temp.theta);
+        }else{
+          ROS_INFO("offset condition is not satisfied, 111");
+
+          offset_temp.x = DBL_MAX;
+          offset_temp.y = DBL_MAX;
+          offset_temp.theta = 2 * M_PI;
+        }
+}
+
+void AmclNode::updateRobPoseFromOffset(geometry_msgs::Pose2D& updatePose, const geometry_msgs::Pose2D offset_temp)
+{
+        float ref_theta = land_mark_.theta;
+        updatePose.x = land_mark_.x + offset_temp.x * cos(ref_theta) - offset_temp.y * sin(ref_theta);
+        updatePose.y = land_mark_.y + offset_temp.x * sin(ref_theta) + offset_temp.y * cos(ref_theta);
+        updatePose.theta = land_mark_.theta + offset_temp.theta;
 }
