@@ -677,6 +677,8 @@ namespace move_base {
     last_oscillation_reset_ = ros::Time::now();
     planning_retries_ = 0;
 
+    ros::Time execycle_time = ros::Time::now();
+
     ros::NodeHandle n;
     while(n.ok())
     {
@@ -723,6 +725,7 @@ namespace move_base {
         }
         else {
           //if we've been preempted explicitly we need to shut things down
+          ROS_INFO("as_ state: new goal is not available");
           resetState();
 
           //notify the ActionServer that we've successfully preempted
@@ -767,8 +770,23 @@ namespace move_base {
       if(obs_status_ == 0){
         //the real work on pursuing a goal is done here
         done = executeCycle(goal, global_plan);
+        execycle_time = ros::Time::now();
       }else{
+        ROS_INFO("detect obs, stop robot");
         publishZeroVelocity();
+        
+        //new add, 2020.3.29
+        if(ros::Time::now() > execycle_time + ros::Duration(planner_patience_))
+        {
+          lock.lock();
+          runPlanner_ = false;
+          lock.unlock();
+
+          ROS_INFO("waiting for so long, set aborted");
+
+          as_->setAborted(move_base_msgs::MoveBaseResult(), "Aborting on the goal because waiting for a long time");
+          return;
+        }
       }
       
 
@@ -874,7 +892,7 @@ namespace move_base {
         recovery_index_ = 0;
     }
 
-    tc_->setOffsetMsg(offset_transform_);
+    // tc_->setOffsetMsg(offset_transform_);
 
     //the move_base state machine, handles the control logic for navigation
     switch(state_){
