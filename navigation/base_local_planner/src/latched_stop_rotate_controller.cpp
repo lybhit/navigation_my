@@ -56,27 +56,6 @@ bool LatchedStopRotateController::isPositionReached(LocalPlannerUtil* planner_ut
   return false;
 }
 
-bool LatchedStopRotateController::isPositionNearBy(LocalPlannerUtil* planner_util,
-    tf::Stamped<tf::Pose> global_pose) {
-  double xy_goal_tolerance = planner_util->getCurrentLimits().xy_goal_tolerance + 0.2;
-
-  //we assume the global goal is the last point in the global plan
-  tf::Stamped<tf::Pose> goal_pose;
-  if ( ! planner_util->getGoal(goal_pose)) {
-    return false;
-  }
-
-  double goal_x = goal_pose.getOrigin().getX();
-  double goal_y = goal_pose.getOrigin().getY();
-
-  //check to see if we've reached the goal position
-  if (base_local_planner::getGoalPositionDistance(global_pose, goal_x, goal_y) <= xy_goal_tolerance) {
-    // xy_tolerance_latch_ = true;
-    return true;
-  }
-  return false;
-}
-
 
 /**
  * returns true if we have passed the goal position and have reached goal orientation.

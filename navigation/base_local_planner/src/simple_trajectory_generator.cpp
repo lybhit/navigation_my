@@ -177,7 +177,7 @@ bool SimpleTrajectoryGenerator::nextTrajectory(Trajectory &comp_traj) {
  * @param pos current position of robot
  * @param vel desired velocity for sampling
  */
-bool SimpleTrajectoryGenerator::generateTrajectory(//生成局部路径数据
+bool SimpleTrajectoryGenerator::generateTrajectory(
       Eigen::Vector3f pos,
       Eigen::Vector3f vel,
       Eigen::Vector3f sample_target_vel,
@@ -234,7 +234,7 @@ bool SimpleTrajectoryGenerator::generateTrajectory(//生成局部路径数据
   for (int i = 0; i < num_steps; ++i) {
 
     //add the point to the trajectory so we can draw it later if we want
-    traj.addPoint(pos[0], pos[1], pos[2]);//此处路径增加点信息
+    traj.addPoint(pos[0], pos[1], pos[2]);
 
     if (continued_acceleration_) {
       //calculate velocities
@@ -260,7 +260,7 @@ Eigen::Vector3f SimpleTrajectoryGenerator::computeNewPositions(const Eigen::Vect
 }
 
 /**
- * change vel using acceleration limits to converge towards sample_target-vel
+ * cheange vel using acceleration limits to converge towards sample_target-vel
  */
 Eigen::Vector3f SimpleTrajectoryGenerator::computeNewVelocities(const Eigen::Vector3f& sample_target_vel,
     const Eigen::Vector3f& vel, Eigen::Vector3f acclimits, double dt) {

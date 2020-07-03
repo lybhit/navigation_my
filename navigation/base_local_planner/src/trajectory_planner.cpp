@@ -906,74 +906,81 @@ namespace base_local_planner{
   Trajectory TrajectoryPlanner::findBestPath(tf::Stamped<tf::Pose> global_pose, tf::Stamped<tf::Pose> global_vel,
       tf::Stamped<tf::Pose>& drive_velocities){
 
-    Eigen::Vector3f pos(global_pose.getOrigin().getX(), global_pose.getOrigin().getY(), tf::getYaw(global_pose.getRotation()));
-    Eigen::Vector3f vel(global_vel.getOrigin().getX(), global_vel.getOrigin().getY(), tf::getYaw(global_vel.getRotation()));
 
-    //reset the map for new operations
-    path_map_.resetPathDist();
-    goal_map_.resetPathDist();
+	  Eigen::Vector3f pos(global_pose.getOrigin().getX(), global_pose.getOrigin().getY(), tf::getYaw(global_pose.getRotation()));
+	  Eigen::Vector3f vel(global_vel.getOrigin().getX(), global_vel.getOrigin().getY(), tf::getYaw(global_vel.getRotation()));
 
-    //temporarily remove obstacles that are within the footprint of the robot
-    std::vector<base_local_planner::Position2DInt> footprint_list =
-        footprint_helper_.getFootprintCells(
-            pos,
-            footprint_spec_,
-            costmap_,
-            true);
+	  //reset the map for new operations
+	  path_map_.resetPathDist();
+	  goal_map_.resetPathDist();
 
-    //mark cells within the initial footprint of the robot
-    for (unsigned int i = 0; i < footprint_list.size(); ++i) {
-      path_map_(footprint_list[i].x, footprint_list[i].y).within_robot = true;
-    }
 
-    //make sure that we update our path based on the global plan and compute costs
-    path_map_.setTargetCells(costmap_, global_plan_);
-    goal_map_.setLocalGoal(costmap_, global_plan_);
-    ROS_DEBUG("Path/Goal distance computed");
+	  //temporarily remove obstacles that are within the footprint of the robot
+	  std::vector<base_local_planner::Position2DInt> footprint_list =
+			  footprint_helper_.getFootprintCells(
+					  pos,
+					  footprint_spec_,
+					  costmap_,
+					  true);
 
-    //rollout trajectories and find the minimum cost one
-    Trajectory best = createTrajectories(pos[0], pos[1], pos[2],
-        vel[0], vel[1], vel[2],
-        acc_lim_x_, acc_lim_y_, acc_lim_theta_);
-    ROS_DEBUG("Trajectories created");
+	  //mark cells within the initial footprint of the robot
+	  for (unsigned int i = 0; i < footprint_list.size(); ++i) {
+		  path_map_(footprint_list[i].x, footprint_list[i].y).within_robot = true;
+	  }
 
-    /*
-    //If we want to print a ppm file to draw goal dist
-    char buf[4096];
-    sprintf(buf, "base_local_planner.ppm");
-    FILE *fp = fopen(buf, "w");
-    if(fp){
-      fprintf(fp, "P3\n");
-      fprintf(fp, "%d %d\n", map_.size_x_, map_.size_y_);
-      fprintf(fp, "255\n");
-      for(int j = map_.size_y_ - 1; j >= 0; --j){
-        for(unsigned int i = 0; i < map_.size_x_; ++i){
-          int g_dist = 255 - int(map_(i, j).goal_dist);
-          int p_dist = 255 - int(map_(i, j).path_dist);
-          if(g_dist < 0)
-            g_dist = 0;
-          if(p_dist < 0)
-            p_dist = 0;
-          fprintf(fp, "%d 0 %d ", g_dist, 0);
-        }
-        fprintf(fp, "\n");
-      }
-      fclose(fp);
-    }
-    */
 
-    if(best.cost_ < 0){
-      drive_velocities.setIdentity();
-    }
-    else{
-      tf::Vector3 start(best.xv_, best.yv_, 0);
-      drive_velocities.setOrigin(start);
-      tf::Matrix3x3 matrix;
-      matrix.setRotation(tf::createQuaternionFromYaw(best.thetav_));
-      drive_velocities.setBasis(matrix);
-    }
+	  //ros::WallTime start = ros::WallTime::now();
+	  //make sure that we update our path based on the global plan and compute costs
+	  path_map_.setTargetCells(costmap_, global_plan_);
 
-    return best;
+	  goal_map_.setLocalGoal(costmap_, global_plan_);
+	  //ros::WallDuration t_diff1 = ros::WallTime::now() - start;
+	  //ROS_INFO("executeCycle move_base_t_diff1 Full control cycle time: %.9f\n", t_diff1.toSec());
+	  ROS_DEBUG("Path/Goal distance computed");
+
+	  //rollout trajectories and find the minimum cost one
+	  Trajectory best = createTrajectories(pos[0], pos[1], pos[2],
+			  vel[0], vel[1], vel[2],
+			  acc_lim_x_, acc_lim_y_, acc_lim_theta_);
+	  ROS_DEBUG("Trajectories created");
+
+		/*
+		//If we want to print a ppm file to draw goal dist
+		char buf[4096];
+		sprintf(buf, "base_local_planner.ppm");
+		FILE *fp = fopen(buf, "w");
+		if(fp){
+		  fprintf(fp, "P3\n");
+		  fprintf(fp, "%d %d\n", map_.size_x_, map_.size_y_);
+		  fprintf(fp, "255\n");
+		  for(int j = map_.size_y_ - 1; j >= 0; --j){
+			for(unsigned int i = 0; i < map_.size_x_; ++i){
+			  int g_dist = 255 - int(map_(i, j).goal_dist);
+			  int p_dist = 255 - int(map_(i, j).path_dist);
+			  if(g_dist < 0)
+				g_dist = 0;
+			  if(p_dist < 0)
+				p_dist = 0;
+			  fprintf(fp, "%d 0 %d ", g_dist, 0);
+			}
+			fprintf(fp, "\n");
+		  }
+		  fclose(fp);
+		}
+		*/
+
+		if(best.cost_ < 0){
+		  drive_velocities.setIdentity();
+		}
+		else{
+		  tf::Vector3 start(best.xv_, best.yv_, 0);
+		  drive_velocities.setOrigin(start);
+		  tf::Matrix3x3 matrix;
+		  matrix.setRotation(tf::createQuaternionFromYaw(best.thetav_));
+		  drive_velocities.setBasis(matrix);
+		}
+
+		return best;
   }
 
   //we need to take the footprint of the robot into account when we calculate cost to obstacles

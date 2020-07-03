@@ -103,10 +103,6 @@ namespace base_local_planner {
     try {
       // get plan_to_global_transform from plan frame to global_frame
       tf::StampedTransform plan_to_global_transform;
-      
-      ROS_INFO("global_frame : %s", global_frame.c_str());
-      ROS_INFO("plan_pose.header.frame_id: %s", plan_pose.header.frame_id.c_str());
-
       tf.waitForTransform(global_frame, ros::Time::now(),
                           plan_pose.header.frame_id, plan_pose.header.stamp,
                           plan_pose.header.frame_id, ros::Duration(0.5));
@@ -252,8 +248,8 @@ namespace base_local_planner {
 
   bool stopped(const nav_msgs::Odometry& base_odom, 
       const double& rot_stopped_velocity, const double& trans_stopped_velocity){
-    return fabs(base_odom.twist.twist.angular.z) <= rot_stopped_velocity 
-      && fabs(base_odom.twist.twist.linear.x) <= trans_stopped_velocity
+    return fabs(base_odom.twist.twist.angular.z) <= rot_stopped_velocity &&
+      fabs(base_odom.twist.twist.linear.x) <= trans_stopped_velocity
       && fabs(base_odom.twist.twist.linear.y) <= trans_stopped_velocity;
   }
 };

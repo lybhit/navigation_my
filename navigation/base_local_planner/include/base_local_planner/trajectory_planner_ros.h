@@ -56,11 +56,11 @@
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Twist.h>
 #include <geometry_msgs/Point.h>
+#include <geometry_msgs/Vector3.h>
 
 #include <tf/transform_listener.h>
 
 #include <boost/thread.hpp>
-
 #include <string>
 
 #include <angles/angles.h>
@@ -69,8 +69,21 @@
 
 #include <dynamic_reconfigure/server.h>
 #include <base_local_planner/BaseLocalPlannerConfig.h>
-
 #include <base_local_planner/odometry_helper_ros.h>
+
+#include <sensor_msgs/LaserScan.h>
+#include <carbot_msgs/BatteryInfo.h>
+#include <carbot_msgs/IDPose.h>
+#include <carbot_msgs/Delayaction.h>
+#include <carbot_msgs/InspectInfo.h>
+#include <carbot_msgs/EquipmentInfo.h>
+#include <carbot_msgs/Taskarrived.h>
+#include <carbot_msgs/FeedbackMsg.h>
+#include <std_msgs/Float32.h>
+#include <std_msgs/String.h>
+#include <std_msgs/Bool.h>
+
+#include <base_local_planner/pid_controller.h>
 
 namespace base_local_planner {
   /**
@@ -114,7 +127,7 @@ namespace base_local_planner {
        * @param cmd_vel Will be filled with the velocity command to be passed to the robot base
        * @return True if a valid trajectory was found, false otherwise
        */
-      bool computeVelocityCommands(geometry_msgs::Twist& cmd_vel);
+      bool computeVelocityCommands(geometry_msgs::Twist& cmd_vel/*,double obstacle_dis*/);
 
       /**
        * @brief  Set the plan that the controller is following
@@ -155,18 +168,36 @@ namespace base_local_planner {
        */
       double scoreTrajectory(double vx_samp, double vy_samp, double vtheta_samp, bool update_map = true);
 
+//      ros::Subscriber laser_scan_sub;
+//      double obstacle_dis;
+//      void laserCB(const sensor_msgs::LaserScan::ConstPtr& laser_scan_data);
+
       bool isInitialized() {
         return initialized_;
       }
-
+      /*
+      // ------------------------------------------------
+      class PIDCONTRL
+	  {
+	  public:
+    	  PIDCONTRL():
+    		  Perror(0.0),
+			  PrevErr(0.0),
+			  Ierror(0.0),
+			  Poutput(0.0)
+    	  {};
+    	  ~PIDCONTRL(){};
+		  double Perror;
+		  double PrevErr;
+		  double Ierror;
+		  double Poutput;
+	   };*/
+      // ------------------------------------------------
       /** @brief Return the inner TrajectoryPlanner object.  Only valid after initialize(). */
       TrajectoryPlanner* getPlanner() const { return tc_; }
 
-      void setOffsetMsg(const tf::Transform& input){
-        offset_transform_ = input;
-      }
 
-    private:
+      private:
       /**
        * @brief Callback to update the local planner's parameters based on dynamic reconfigure
        */
@@ -215,7 +246,7 @@ namespace base_local_planner {
       boost::recursive_mutex odom_lock_;
 
       double max_vel_th_, min_vel_th_;
-      double acc_lim_x_, acc_lim_y_, acc_lim_theta_;
+      double acc_lim_x_,  acc_lim_y_,  acc_lim_theta_;
       double sim_period_;
       bool rotating_to_goal_;
       bool reached_goal_;
@@ -227,13 +258,56 @@ namespace base_local_planner {
       base_local_planner::BaseLocalPlannerConfig default_config_;
       bool setup_;
 
-
       bool initialized_;
       base_local_planner::OdometryHelperRos odom_helper_;
 
       std::vector<geometry_msgs::Point> footprint_spec_;
 
-      tf::Transform offset_transform_;
+
+
+    private:
+      // ------------------------------------------------
+
+      double cal_distance(geometry_msgs::Point cur_pos,geometry_msgs::Point pre_pose,geometry_msgs::Point next_pose);
+
+      double cal_path_rotation(geometry_msgs::Point cur_pos,geometry_msgs::Point next_pose);
+      //double normalize_angle_me(double angle);
+
+      void task_done(geometry_msgs::Twist& cmd_vel, double goal_x, double goal_y, double goal_th);
+      // ------------------------------------------------
+      double slowdown_goal_tolerance_;
+      double stop_goal_tolerance_;
+      double max_vel_x, min_vel_x;
+      double escape_vel_;
+      //carbot_msgs::BatteryInfo _batteryInfo;
+      //carbot_msgs::Taskarrived _task_current;
+      int task_type;
+      ros::Subscriber task_current_sub;
+      void task_current_recv(const carbot_msgs::Taskarrived& task_current);
+      
+      //ros::Subscriber batteryInfo_sub;
+      //void batteryInfo_rec(const carbot_msgs::BatteryInfo& batteryInfo);
+      bool BC_Status;
+      ros::Subscriber feedbackMsg_sub;
+      void feedbackMsg_recv(const carbot_msgs::FeedbackMsg& feedbackMsg);
+
+      int turn1_num;
+      // ------------------------------------------------
+
+      double Kp_move_, Kd_move_, Ki_move_, Ko_move_, Ka_move_, Kb_move_;
+
+
+      double path_rot;
+      double goal_distance;
+
+
+      pid_controller distance_pid,yaw_pid; 
+      geometry_msgs::Point p_start,p_end,p_cur;
+
+      Trajectory path;
+
+      ros::NodeHandle _nh;
+
   };
 };
 #endif

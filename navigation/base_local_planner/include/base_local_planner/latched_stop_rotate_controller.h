@@ -80,9 +80,6 @@ public:
                             Eigen::Vector3f vel,
                             Eigen::Vector3f vel_samples)> obstacle_check);
 
-  bool isPositionNearBy(LocalPlannerUtil* planner_util,
-    tf::Stamped<tf::Pose> global_pose);
-
 private:
   inline double sign(double x){
     return x < 0.0 ? -1.0 : 1.0;
